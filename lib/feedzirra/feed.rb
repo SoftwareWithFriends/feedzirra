@@ -202,6 +202,48 @@ module Feedzirra
       return urls.is_a?(String) ? responses.values.first : responses
     end
 
+    def self.easy_fetch_and_parse(url, options = {})
+      response = nil
+      easy = Curl::Easy.new(url) do |curl|
+        setup_easy curl, options
+        curl.headers["If-Modified-Since"] = options[:if_modified_since].httpdate if options.has_key?(:if_modified_since)
+        curl.headers["If-None-Match"]     = options[:if_none_match] if options.has_key?(:if_none_match)
+
+        curl.on_success do |c|
+          xml = decode_content(c)
+          klass = determine_feed_parser_for_xml(xml)
+          
+          if klass
+            begin
+              feed = klass.parse(xml, Proc.new{|message| warn "Error while parsing [#{url}] #{message}" })
+              feed.feed_url = c.last_effective_url
+              feed.etag = etag_from_header(c.header_str)
+              feed.last_modified = last_modified_from_header(c.header_str)
+              response = feed
+              options[:on_success].call(url, feed) if options.has_key?(:on_success)
+            rescue Exception => e
+              options[:on_failure].call(url, c.response_code, c.header_str, c.body_str) if options.has_key?(:on_failure)
+            end
+          else
+            # puts "Error determining parser for #{url} - #{c.last_effective_url}"
+            # raise NoParserAvailable.new("no valid parser for content.") (this would unfortunately fail the whole 'multi', so it's not really usable)
+            options[:on_failure].call(url, c.response_code, c.header_str, c.body_str) if options.has_key?(:on_failure)
+          end
+        end
+        
+        curl.on_failure do |c, err|
+          response = c.response_code
+          if c.response_code == 304 # it's not modified. this isn't an error condition
+            options[:on_success].call(url, nil) if options.has_key?(:on_success)
+          else
+            options[:on_failure].call(url, c.response_code, c.header_str, c.body_str) if options.has_key?(:on_failure)
+          end
+        end
+      end
+      easy.perform
+      response
+    end
+
     # Decodes the XML document if it was compressed.
     #
     # === Parameters
